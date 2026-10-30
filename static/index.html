@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EC2 Monitoring Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root { --bg:#f4f6fa; --card:#fff; --text:#1d2433; --muted:#6b7385; --line:#e3e7ef;
+          --ok:#1a9d55; --bad:#d93838; --warn:#e08a00; --accent:#2f6fed; --sel:#e8effd; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f141c; --card:#182130; --text:#e8ecf4; --muted:#93a0b8; --line:#273247; --sel:#21304d; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, Segoe UI, Arial, sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between;
+           padding:16px 24px; border-bottom:1px solid var(--line); background:var(--card); }
+  h1 { font-size:20px; margin:0; }
+  h2 { font-size:15px; margin:0 0 12px; }
+  .sub { color:var(--muted); font-size:13px; margin-top:2px; }
+  .controls { display:flex; gap:10px; align-items:center; font-size:14px; flex-wrap:wrap; }
+  select, button { padding:6px 10px; border-radius:6px; border:1px solid var(--line);
+                   background:var(--card); color:var(--text); font-size:14px; cursor:pointer; }
+  main { padding:24px; max-width:1200px; margin:0 auto; }
+  .panel, .stat { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:16px; margin:20px 0; }
+  .stat .label { color:var(--muted); font-size:13px; }
+  .stat .value { font-size:28px; font-weight:600; margin-top:6px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(380px,1fr)); gap:16px; }
+  .chart-wrap { position:relative; height:240px; }
+  .empty { color:var(--muted); font-size:14px; padding:20px 0; display:none; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); } .warn { color:var(--warn); }
+  #error { display:none; background:#fdeaea; color:#8a1f1f; padding:12px 16px; border-radius:8px; margin-bottom:16px; font-size:14px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:9px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:500; }
+  .scroll { overflow-x:auto; }
+  #ov-rows tr { cursor:pointer; }
+  #ov-rows tr:hover { background:var(--sel); }
+  #ov-rows tr.selected { background:var(--sel); }
+  .pill { padding:2px 9px; border-radius:10px; font-size:12px; font-weight:600; display:inline-block; }
+  .pill.good { background:#e4f6ec; color:#157a42; } .pill.alarm { background:#fdeaea; color:#a12727; }
+  .pill.none { background:var(--line); color:var(--muted); }
+  .tag { padding:2px 8px; border-radius:10px; font-size:12px; font-weight:600; }
+  .tag.ALARM { background:#fdeaea; color:#a12727; } .tag.OK { background:#e4f6ec; color:#157a42; }
+  .tag.TEST { background:#e7eefc; color:#2455c3; }
+  .alerts-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; gap:10px; flex-wrap:wrap; }
+  .section { margin-top:20px; }
+  @media (max-width:480px){ .grid { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>EC2 Monitoring Dashboard</h1>
+    <div class="sub" id="instance">Loading instances...</div>
+  </div>
+  <div class="controls">
+    <label for="inst">Instance</label>
+    <select id="inst"></select>
+    <label for="range">Range</label>
+    <select id="range">
+      <option value="60">Last 1 hour</option>
+      <option value="180">Last 3 hours</option>
+      <option value="720">Last 12 hours</option>
+      <option value="1440">Last 24 hours</option>
+    </select>
+    <button id="refresh">Refresh</button>
+    <span class="sub" id="updated"></span>
+  </div>
+</header>
+
+<main>
+  <div id="error"></div>
+
+  <section class="panel">
+    <h2>All instances <span class="sub">(click a row to see its charts)</span></h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Instance</th><th>CPU</th><th>Network in</th><th>Network out</th><th>Status check</th><th>Alerts</th></tr></thead>
+        <tbody id="ov-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="stats">
+    <div class="stat"><div class="label">CPU utilization</div><div class="value" id="s-cpu">--</div></div>
+    <div class="stat"><div class="label">Network in (latest)</div><div class="value" id="s-in">--</div></div>
+    <div class="stat"><div class="label">Network out (latest)</div><div class="value" id="s-out">--</div></div>
+    <div class="stat"><div class="label">Status check</div><div class="value" id="s-status">--</div></div>
+  </section>
+
+  <section class="grid">
+    <div class="panel"><h2 id="t-cpu">CPU utilization (%)</h2>
+      <div class="chart-wrap"><canvas id="c-cpu"></canvas></div><div class="empty" id="e-cpu">No data yet.</div></div>
+    <div class="panel"><h2>Network in (KB)</h2>
+      <div class="chart-wrap"><canvas id="c-in"></canvas></div><div class="empty" id="e-in">No data yet.</div></div>
+    <div class="panel"><h2>Network out (KB)</h2>
+      <div class="chart-wrap"><canvas id="c-out"></canvas></div><div class="empty" id="e-out">No data yet.</div></div>
+    <div class="panel"><h2>Status check failed (0 = healthy)</h2>
+      <div class="chart-wrap"><canvas id="c-status"></canvas></div><div class="empty" id="e-status">No data yet.</div></div>
+  </section>
+
+  <section class="panel section">
+    <div class="alerts-head">
+      <h2 style="margin:0">Alerts (all instances)</h2>
+      <div><span class="sub" id="alert-config"></span> <button id="test-alert">Send test alert</button></div>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Time</th><th>Type</th><th>Instance</th><th>Alert</th><th>Details</th><th>Email</th></tr></thead>
+        <tbody id="alert-rows"></tbody>
+      </table>
+    </div>
+    <div class="empty" id="e-alerts" style="display:block">No alerts yet.</div>
+  </section>
+</main>
+
+<script>
+const REFRESH_MS = 30000;
+const CPU_ALERT = 80;
+let selected = null;
+let instances = [];
+
+function makeChart(id, color, opts = {}) {
+  return new Chart(document.getElementById(id), {
+    type: "line",
+    data: { labels: [], datasets: [{ data: [], borderColor: color, backgroundColor: color + "22",
+            fill: true, tension: 0.25, pointRadius: 2, borderWidth: 2 }] },
+    options: { responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: { legend: { display: false } },
+      scales: { y: { beginAtZero: true, ...opts.y }, x: { ticks: { maxTicksLimit: 6 } } } }
+  });
+}
+const charts = {
+  cpu: makeChart("c-cpu", "#2f6fed", { y: { max: 100 } }),
+  network_in: makeChart("c-in", "#1a9d55"),
+  network_out: makeChart("c-out", "#e08a00"),
+  status_check: makeChart("c-status", "#d93838", { y: { max: 1, ticks: { stepSize: 1 } } })
+};
+const emptyIds = { cpu: "e-cpu", network_in: "e-in", network_out: "e-out", status_check: "e-status" };
+
+async function getJSON(url) {
+  const res = await fetch(url);
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.details || body.error || res.statusText);
+  return body;
+}
+const esc = t => String(t).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtTime = iso => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const toKB = v => +(v / 1024).toFixed(1);
+const last = arr => (arr.length ? arr[arr.length - 1].value : null);
+const labelOf = id => (instances.find(i => i.id === id) || {}).label || id;
+
+function updateChart(key, data, transform = v => v) {
+  const chart = charts[key];
+  chart.data.labels = data.map(p => fmtTime(p.time));
+  chart.data.datasets[0].data = data.map(p => transform(p.value));
+  chart.update();
+  document.getElementById(emptyIds[key]).style.display = data.length ? "none" : "block";
+}
+
+function cpuClass(c) { return c === null ? "" : c >= CPU_ALERT ? "bad" : c >= 60 ? "warn" : "ok"; }
+
+async function loadOverview() {
+  const o = await getJSON("/api/overview");
+  document.getElementById("ov-rows").innerHTML = o.instances.map(r => {
+    if (r.error) return `<tr data-id="${esc(r.id)}" class="${r.id === selected ? "selected" : ""}"><td>${esc(r.label)}<div class="sub">${esc(r.id)}</div></td><td colspan="5" class="bad">${esc(r.error)}</td></tr>`;
+    const st = r.status === null ? "<span class='pill none'>no data</span>" : r.status === 0 ? "<span class='pill good'>Healthy</span>" : "<span class='pill alarm'>FAILED</span>";
+    const al = r.alerting ? "<span class='pill alarm'>ALARM</span>" : "<span class='pill good'>OK</span>";
+    return `<tr data-id="${esc(r.id)}" class="${r.id === selected ? "selected" : ""}">
+      <td><b>${esc(r.label)}</b><div class="sub">${esc(r.id)}</div></td>
+      <td class="${cpuClass(r.cpu)}">${r.cpu === null ? "--" : r.cpu.toFixed(1) + "%"}</td>
+      <td>${r.network_in === null ? "--" : toKB(r.network_in) + " KB"}</td>
+      <td>${r.network_out === null ? "--" : toKB(r.network_out) + " KB"}</td>
+      <td>${st}</td><td>${al}</td></tr>`;
+  }).join("");
+  document.querySelectorAll("#ov-rows tr").forEach(tr => tr.addEventListener("click", () => selectInstance(tr.dataset.id)));
+}
+
+async function loadCharts() {
+  const minutes = document.getElementById("range").value;
+  const q = `instance=${encodeURIComponent(selected)}&minutes=${minutes}`;
+  const keys = ["cpu", "network_in", "network_out", "status_check"];
+  const results = await Promise.all(keys.map(k => getJSON(`/api/metrics/${k}?${q}`)));
+  const [cpu, nin, nout, status] = results.map(r => r.data);
+  updateChart("cpu", cpu); updateChart("network_in", nin, toKB);
+  updateChart("network_out", nout, toKB); updateChart("status_check", status);
+  document.getElementById("t-cpu").textContent = `CPU utilization (%) - ${labelOf(selected)}`;
+  const c = last(cpu), i = last(nin), o = last(nout), s = last(status);
+  const cpuEl = document.getElementById("s-cpu");
+  cpuEl.textContent = c === null ? "--" : c.toFixed(1) + "%"; cpuEl.className = "value " + cpuClass(c);
+  document.getElementById("s-in").textContent = i === null ? "--" : toKB(i) + " KB";
+  document.getElementById("s-out").textContent = o === null ? "--" : toKB(o) + " KB";
+  const st = document.getElementById("s-status");
+  st.textContent = s === null ? "--" : s === 0 ? "Healthy" : "FAILED";
+  st.className = "value " + (s === null ? "" : s === 0 ? "ok" : "bad");
+}
+
+async function loadAlerts() {
+  const a = await getJSON("/api/alerts");
+  const c = a.config;
+  document.getElementById("alert-config").textContent = `CPU > ${c.cpu_threshold}% | every ${c.check_interval}s | cooldown ${c.cooldown_minutes} min`;
+  document.getElementById("alert-rows").innerHTML = a.history.map(h => `
+    <tr><td>${new Date(h.time).toLocaleString()}</td>
+    <td><span class="tag ${esc(h.kind)}">${esc(h.kind)}</span></td>
+    <td>${esc(h.label)}</td><td>${esc(h.name)}</td><td>${esc(h.message)}</td>
+    <td>${h.sent ? "Sent" : "<span class='bad'>Failed: " + esc(h.error || "") + "</span>"}</td></tr>`).join("");
+  document.getElementById("e-alerts").style.display = a.history.length ? "none" : "block";
+}
+
+async function load() {
+  const errBox = document.getElementById("error");
+  try {
+    await Promise.all([loadOverview(), loadCharts(), loadAlerts()]);
+    errBox.style.display = "none";
+    document.getElementById("updated").textContent = "Updated " + new Date().toLocaleTimeString();
+  } catch (e) {
+    errBox.textContent = "Could not load metrics: " + e.message; errBox.style.display = "block";
+  }
+}
+
+function selectInstance(id) {
+  selected = id;
+  document.getElementById("inst").value = id;
+  load();
+}
+
+async function sendTest() {
+  const btn = document.getElementById("test-alert"); btn.disabled = true;
+  try {
+    const res = await fetch("/api/alerts/test", { method: "POST" });
+    const body = await res.json();
+    if (!res.ok) alert("Test alert failed: " + (body.error || "unknown error"));
+  } finally { btn.disabled = false; loadAlerts(); }
+}
+
+async function init() {
+  try {
+    const d = await getJSON("/api/instances");
+    instances = d.instances; selected = instances[0].id;
+    document.getElementById("inst").innerHTML = instances.map(i => `<option value="${esc(i.id)}">${esc(i.label)}${i.label !== i.id ? " (" + esc(i.id) + ")" : ""}</option>`).join("");
+    document.getElementById("instance").textContent = `${instances.length} instance(s) | Region ${d.region}`;
+  } catch (e) {
+    document.getElementById("instance").textContent = "Backend not reachable"; return;
+  }
+  document.getElementById("inst").addEventListener("change", e => selectInstance(e.target.value));
+  document.getElementById("range").addEventListener("change", load);
+  document.getElementById("refresh").addEventListener("click", load);
+  document.getElementById("test-alert").addEventListener("click", sendTest);
+  load();
+  setInterval(load, REFRESH_MS);
+}
+init();
+</script>
+</body>
+</html>
